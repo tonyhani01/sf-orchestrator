@@ -11,6 +11,7 @@ rm -f .claude/sf-orchestrator-approval.json
 expect 2 agent_missing_model.json
 expect 2 agent_missing_model_namespaced.json
 expect 2 bash_deploy_unapproved.json
+expect 2 bash_delete_source.json
 expect 0 bash_ok.json
 mkdir -p .claude
 python3 - <<'EOF'
@@ -19,7 +20,24 @@ json.dump({"org": "my-sandbox", "scope": ["classes/Foo.cls"],
            "grantedAt": datetime.datetime.now(datetime.timezone.utc).isoformat()},
           open('.claude/sf-orchestrator-approval.json', 'w'))
 EOF
-expect 0 bash_deploy_unapproved.json   # now approved: same org appears in command
+expect 0 bash_deploy_unapproved.json   # now approved: --target-org matches
+expect 0 bash_delete_source.json       # delete source is gated, and approved here
+expect 2 bash_deploy_wrong_org.json    # approved org only in a path, --target-org differs
+expect 2 bash_deploy_no_org_flag.json  # no explicit --target-org flag: blocked
+python3 - <<'EOF'
+import json, datetime
+ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+json.dump({"org": "my-sandbox", "scope": ["classes/Foo.cls"], "grantedAt": ts},
+          open('.claude/sf-orchestrator-approval.json', 'w'))
+EOF
+expect 0 bash_deploy_unapproved.json   # Z-suffixed timestamp parses on all Pythons
+python3 - <<'EOF'
+import json, datetime
+json.dump({"org": "", "scope": ["classes/Foo.cls"],
+           "grantedAt": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+          open('.claude/sf-orchestrator-approval.json', 'w'))
+EOF
+expect 2 bash_deploy_unapproved.json   # empty org must not bypass the org check
 python3 - <<'EOF'
 import json
 json.dump({"org": "my-sandbox", "scope": ["classes/Foo.cls"],

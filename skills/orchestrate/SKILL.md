@@ -15,10 +15,10 @@ You are the orchestrating model. Your job is high-value thinking only: intake an
 
 Run these steps in order, every time this skill is invoked:
 
-1. **Capability check.** Probe every capability in the table below by trying to load each candidate skill name in order via the Skill tool (current upstream name first, legacy name second). A capability is:
-   - **supported** — a skill name loaded.
-   - **degraded** — no skill loaded, but a fallback cheat-sheet exists for it (workers still cover it, flagging `fallback: true`).
-   - **blocked** — no skill loaded and no safe fallback exists (this always applies to `flow`, `deploy`, and complex metadata work when nothing loaded).
+1. **Capability check.** Check every capability in the table below against the **available-skills listing** (the skill list in your context, or ListSkills where available) — look for each candidate name in order (current upstream name first, legacy name second). Do NOT probe by invoking the Skill tool: loading a skill injects its full instructions into your context, and invoking unlisted names is invalid. You only need to know each skill *exists* — the worker that needs it loads it at execution time. A capability is:
+   - **supported** — a candidate skill name appears in the listing.
+   - **degraded** — no candidate listed, but a fallback cheat-sheet exists for it (workers still cover it, flagging `fallback: true`).
+   - **blocked** — no candidate listed and no safe fallback exists (this always applies to `flow`, `deploy`, and complex metadata work when nothing is listed).
 
    | Capability | Probe list |
    |---|---|
@@ -101,7 +101,7 @@ Collect every task in the request verbatim. Group related tasks into work units.
 Keep the in-session task list and the run manifest (section 3) in sync at every step. The manifest is the source of truth for resume.
 
 ### 5.3 Plan per unit
-For each unit, produce: exact files (the unit's owned-file list), exact interfaces, acceptance criteria, gotchas, and do-not-touch boundaries. **Pin the absolute repository root in every worker prompt and write all owned-file paths as absolute paths** — subagents do not reliably inherit your working directory, and relative paths have caused workers to write files outside the repo. **Mapper-first is mandatory**: dispatch sf-mapper to verify every schema/metadata assumption in the plan before the plan is considered final — do not let a worker discover a wrong field name mid-implementation. Gotchas you inline into the plan should be **memory lessons and discovered traps only** — the project's CLAUDE.md already reaches every subagent natively via the conventions hook, so do NOT re-paste CLAUDE.md content into unit prompts.
+For each unit, produce: exact files (the unit's owned-file list), exact interfaces, acceptance criteria, gotchas, and do-not-touch boundaries. **Pin the absolute repository root in every worker prompt and write all owned-file paths as absolute paths** — subagents do not reliably inherit your working directory, and relative paths have caused workers to write files outside the repo. **Mapper-first is mandatory**: dispatch sf-mapper to verify every schema/metadata assumption in the plan before the plan is considered final — do not let a worker discover a wrong field name mid-implementation. Gotchas you inline into the plan should be **memory lessons and discovered traps only** — Claude Code passes the project's CLAUDE.md to subagents itself, so do NOT re-paste CLAUDE.md content into unit prompts. (Verify this once per session: if a worker's report shows it clearly lacked project conventions, your environment is not delivering CLAUDE.md to subagents — in that case inline the relevant conventions into subsequent unit prompts instead.)
 
 ### 5.4 Dispatch
 
@@ -136,7 +136,9 @@ Before dispatching sf-deploy-worker, or any unit that performs data deletion, al
    { "org": "<alias>", "scope": ["<components>"], "grantedAt": "<ISO-8601 timestamp>" }
    ```
 
-The plugin's guard enforces this at the Bash-command level, independent of what you claim in the transcript: it blocks any deploy/destructive command unless the approval file exists, is less than 60 minutes old, and names the target org within the command itself. This applies even in autonomous mode — autonomy never substitutes for a fresh, session-scoped, org-matching approval file. **Delete the approval file once the gated unit completes** — do not let it linger for reuse by a later, unconfirmed unit.
+   `org` must be non-empty — the guard rejects an approval file with a missing or blank org.
+
+The plugin's guard enforces this at the Bash-command level, independent of what you claim in the transcript: it blocks any deploy/destructive command unless the approval file exists, is less than 60 minutes old, names a non-empty org, and the command targets that exact org via `--target-org`/`-o` (or legacy `--targetusername`/`-u`). Always pass the target-org flag explicitly on gated commands — relying on the CLI's default org will be blocked. Scope conformance is NOT machine-checked; you are responsible for dispatching only the approved components. This applies even in autonomous mode — autonomy never substitutes for a fresh, session-scoped, org-matching approval file. **Delete the approval file once the gated unit completes** — do not let it linger for reuse by a later, unconfirmed unit.
 
 ## 7. External executors
 
@@ -154,9 +156,9 @@ External executors (for example, a local CLI used as a mid-tier between default 
 | Mistake | Why it matters |
 |---|---|
 | Dispatching an Agent call without an explicit `model` | Guard-blocked outright; also silently defeats per-worker model tuning |
-| Dispatching an Agent call without an explicit `subagent_type`, or forking execution | Breaks traceability and the manifest; guard targets `sf-*` dispatches specifically |
+| Dispatching an Agent call without an explicit `subagent_type`, or forking execution | Breaks traceability and the manifest — and the guard can only inspect dispatches that carry an `sf-*` subagent_type, so a type-less or forked dispatch escapes enforcement entirely; this rule is on you |
 | Merging a mixed-discipline unit into one "dominant" worker | Produces out-of-scope edits and unreviewable diffs; always split along ownership boundaries |
-| Re-pasting CLAUDE.md content into a unit's dispatch prompt | Redundant — the conventions hook already delivers it to every subagent; bloats prompts and risks drift from the live file |
+| Re-pasting CLAUDE.md content into a unit's dispatch prompt | Redundant — Claude Code already delivers it to subagents; bloats prompts and risks drift from the live file (see section 5.3 for the once-per-session verification) |
 | Retrying an `environment` failure | Wastes attempts on something no retry can fix; surface to the user instead |
 | Dispatching a deploy or data-deletion unit without a fresh, matching approval file | Guard-blocked, and more importantly bypasses the user's actual confirmation of org + scope |
 | Treating a `degraded` capability as if it were `supported` | Degraded means a fallback cheat-sheet is standing in for real skill coverage; must be flagged `fallback: true`, not silently trusted |
