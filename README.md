@@ -141,6 +141,8 @@ Be precise about what is actually enforced versus what is a convention the model
 
 **Token-cost warning:** fan-out multiplies usage. Every dispatched work unit is a full subagent call, and mapper/reviewer passes run in addition to the workers doing the implementation. For a single small change, orchestration is pure overhead — the skill says so explicitly and offers to execute directly instead.
 
+**Measured, honestly:** in our own benchmarks ([docs/BENCHMARKS.md](docs/BENCHMARKS.md)), self-contained headless tasks cost 2–3.6× MORE orchestrated than inline on the expensive model — worker execution is cheap, but coordination on the expensive model dominates small tasks. Orchestration pays off for large batches, context-heavy or verbose-tool-output work (test loops, log analysis), beyond-one-context jobs, and when independent adversarial review matters — not as a blanket cost optimization.
+
 ## Bring your own conventions
 
 Claude Code passes each project's `CLAUDE.md` to subagents automatically. Org-specific policy (naming conventions, layered architecture rules, logging patterns, deploy restrictions) enters entirely through your own `CLAUDE.md` — the orchestrator does not re-paste it into worker prompts, and this plugin ships with no org-specific policy baked in.

@@ -101,7 +101,7 @@ Collect every task in the request verbatim. Group related tasks into work units.
 Keep the in-session task list and the run manifest (section 3) in sync at every step. The manifest is the source of truth for resume.
 
 ### 5.3 Plan per unit
-For each unit, produce: exact files (the unit's owned-file list), exact interfaces, acceptance criteria, gotchas, and do-not-touch boundaries. **Mapper-first is mandatory**: dispatch sf-mapper to verify every schema/metadata assumption in the plan before the plan is considered final — do not let a worker discover a wrong field name mid-implementation. Gotchas you inline into the plan should be **memory lessons and discovered traps only** — the project's CLAUDE.md already reaches every subagent natively via the conventions hook, so do NOT re-paste CLAUDE.md content into unit prompts.
+For each unit, produce: exact files (the unit's owned-file list), exact interfaces, acceptance criteria, gotchas, and do-not-touch boundaries. **Pin the absolute repository root in every worker prompt and write all owned-file paths as absolute paths** — subagents do not reliably inherit your working directory, and relative paths have caused workers to write files outside the repo. **Mapper-first is mandatory**: dispatch sf-mapper to verify every schema/metadata assumption in the plan before the plan is considered final — do not let a worker discover a wrong field name mid-implementation. Gotchas you inline into the plan should be **memory lessons and discovered traps only** — the project's CLAUDE.md already reaches every subagent natively via the conventions hook, so do NOT re-paste CLAUDE.md content into unit prompts.
 
 ### 5.4 Dispatch
 
