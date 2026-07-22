@@ -22,7 +22,8 @@ def main():
 
     if tool == 'Agent':
         sub = str(tin.get('subagent_type', ''))
-        if sub.startswith('sf-') and not tin.get('model'):
+        # installed plugin agents are namespaced ("<plugin>:sf-apex-worker") — match the agent segment
+        if sub.split(':')[-1].startswith('sf-') and not tin.get('model'):
             block(f'dispatch of {sub} without an explicit model parameter. '
                   'Set model from .claude/sf-orchestrator.json and retry.')
 

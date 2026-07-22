@@ -9,6 +9,7 @@ expect() { # expect <exit-code> <fixture>
 }
 rm -f .claude/sf-orchestrator-approval.json
 expect 2 agent_missing_model.json
+expect 2 agent_missing_model_namespaced.json
 expect 2 bash_deploy_unapproved.json
 expect 0 bash_ok.json
 mkdir -p .claude
