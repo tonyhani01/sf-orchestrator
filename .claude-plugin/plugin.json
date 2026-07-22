@@ -5,7 +5,7 @@
   "description": "Independent Salesforce development orchestrator for Claude Code: a large model plans, routes, and reviews while cheap specialized workers (Apex, LWC, tests, data, debug, metadata, deploy) execute using the public forcedotcom/sf-skills library. Not affiliated with Salesforce or Anthropic.",
   "author": { "name": "Antony Hani" },
   "license": "MIT",
-  "repository": "https://github.com/OWNER/sf-orchestrator",
-  "homepage": "https://github.com/OWNER/sf-orchestrator#readme",
+  "repository": "https://github.com/tonyhani01/sf-orchestrator",
+  "homepage": "https://github.com/tonyhani01/sf-orchestrator#readme",
   "keywords": ["salesforce", "orchestrator", "agents", "apex", "lwc", "claude-code"]
 }
