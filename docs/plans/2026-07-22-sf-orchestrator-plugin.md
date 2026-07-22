@@ -1,404 +1,639 @@
-# sf-orchestrator Plugin Implementation Plan
+# sf-orchestrator Plugin Implementation Plan (rev 2)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the open-source `sf-orchestrator` Claude Code plugin: 2 skills (orchestrate, config) + 9 Salesforce worker agents + config schema + README, per `docs/DESIGN.md`.
+**Goal:** Build the open-source `sf-orchestrator` Claude Code plugin per `docs/DESIGN.md` (rev 2): 2 skills, 9 agents, enforcement hooks, config schema, validation + CI, community files.
 
-**Architecture:** A plugin repo (`.claude-plugin/` manifest, `skills/`, `agents/`). Worker agents are thin wrappers that load official Salesforce skills at runtime and carry an original cheat-sheet fallback. The orchestrate skill routes work units to workers with explicit models from `.claude/sf-orchestrator.json`. Validation is a shell script checking JSON validity and agent/skill frontmatter.
+**Architecture:** Plugin repo (`.claude-plugin/` manifest, `skills/`, `agents/`, `hooks/`). Workers probe-and-load `forcedotcom/sf-skills` capabilities at runtime with per-capability fallback (supported/degraded/blocked). A PreToolUse hook hard-blocks model-less `sf-*` dispatches and unapproved deploy commands. Orchestrate skill routes split-by-discipline units with config-driven models, run manifest, typed failures, refute-stance review.
 
-**Tech Stack:** Markdown skills/agents, JSON manifests, bash + python3 (stdlib) validation script. No runtime dependencies.
+**Tech Stack:** Markdown skills/agents, JSON manifests + JSON Schema, python3 (stdlib) hook + validator, bash, GitHub Actions.
 
 ## Global Constraints
 
-- Repo root: `/Users/tonyhani/Desktop/VS Code Projects/sf-orchestrator` (all paths below relative to it).
-- License: MIT. Plugin name: `sf-orchestrator`.
-- NO content copied from Salesforce's skills, and NOTHING from any internal guideline document (e.g. sfdc-dev). Cheat-sheets must be original generic best practices.
-- Agent frontmatter: `name`, `description`, `tools` only — **never `model`** (models come from orchestrator dispatch).
-- Every agent prompt must include, verbatim in spirit: skill-load mandate (first instruction), cheat-sheet fallback rule, compact-report contract, blocked-worker protocol.
-- Commit after every task with a conventional-commit message ending in `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+- Repo root: the `sf-orchestrator` repo (all paths relative to it). Public docs (README, community files, skill/agent bodies) must contain NO local machine paths, client project names, or internal document references.
+- License MIT; plugin name `sf-orchestrator`; independence disclaimer required in README (verbatim from DESIGN.md header note).
+- NO content copied from Salesforce's skills or any internal guideline document. Cheat-sheets are original generic best practices.
+- Agent frontmatter: `name`, `description`, `tools` only — **never `model`**.
+- Every agent carries: probe-and-load mandate, precedence rule, blocked-worker protocol, compact-report contract, fallback cheat-sheet.
+- Capability probe lists are those in DESIGN.md "Upstream dependency" table — use them exactly wherever `<PROBE:x>` appears below.
+- Commit after every task, conventional-commit style.
 
 ---
 
-### Task 1: Scaffold + validation script
+### Task 1: Scaffold + validator
 
 **Files:**
-- Create: `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `LICENSE`, `scripts/validate.sh`
+- Create: `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `LICENSE`, `scripts/validate.sh`, `scripts/contract_check.py`
 
 **Interfaces:**
-- Produces: `bash scripts/validate.sh` → exits 0 printing `PASS` when all JSON parses and every `agents/*.md` + `skills/*/SKILL.md` has valid frontmatter (`name`, `description`; agents additionally `tools` and NO `model`). Later tasks run this as their test.
+- Produces: `bash scripts/validate.sh` → `PASS`/`FAIL`; runs `claude plugin validate . --strict` when the `claude` CLI is available, then `python3 scripts/contract_check.py`. Later tasks use this as their test.
 
-- [ ] **Step 1: Write `scripts/validate.sh` (the failing test)**
+- [ ] **Step 1: Write `scripts/contract_check.py`**
+
+```python
+#!/usr/bin/env python3
+"""Contract checks beyond `claude plugin validate`. Exit 0 = ok."""
+import glob, json, re, sys
+
+errors = []
+
+def frontmatter(path):
+    text = open(path).read()
+    m = re.match(r'^---\n(.*?)\n---\n', text, re.S)
+    if not m:
+        return None
+    return dict(re.findall(r'^([A-Za-z_-]+):\s*(.*)$', m.group(1), re.M))
+
+for j in ('.claude-plugin/plugin.json', '.claude-plugin/marketplace.json',
+          'schemas/config.schema.json', 'hooks/hooks.json'):
+    try:
+        json.load(open(j))
+    except FileNotFoundError:
+        errors.append(f'missing {j}')
+    except json.JSONDecodeError as e:
+        errors.append(f'invalid JSON {j}: {e}')
+
+agents = sorted(glob.glob('agents/*.md'))
+skills = sorted(glob.glob('skills/*/SKILL.md'))
+if len(agents) != 9:
+    errors.append(f'expected 9 agents, found {len(agents)}')
+if len(skills) != 2:
+    errors.append(f'expected 2 skills, found {len(skills)}')
+
+REQUIRED_AGENT_PHRASES = ['fallback: true', 'STOP', 'skills_loaded']
+for p in agents:
+    fm = frontmatter(p)
+    body = open(p).read()
+    if not fm or not fm.get('name') or not fm.get('description') or not fm.get('tools'):
+        errors.append(f'{p}: frontmatter must have name/description/tools')
+        continue
+    if 'model' in fm:
+        errors.append(f'{p}: model is forbidden in frontmatter')
+    if fm['name'] != p.split('/')[-1][:-3]:
+        errors.append(f'{p}: frontmatter name must match filename')
+    for phrase in REQUIRED_AGENT_PHRASES:
+        if phrase not in body:
+            errors.append(f'{p}: missing contract phrase {phrase!r}')
+
+for p in skills:
+    fm = frontmatter(p)
+    if not fm or not fm.get('name') or not fm.get('description'):
+        errors.append(f'{p}: frontmatter must have name/description')
+
+for e in errors:
+    print(f'FAIL: {e}')
+sys.exit(1 if errors else 0)
+```
+
+- [ ] **Step 2: Write `scripts/validate.sh`**
 
 ```bash
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 cd "$(dirname "$0")/.."
 fail=0
-
-for j in .claude-plugin/plugin.json .claude-plugin/marketplace.json; do
-  python3 -m json.tool "$j" >/dev/null 2>&1 || { echo "FAIL: invalid JSON $j"; fail=1; }
-done
-
-python3 - <<'EOF' || fail=1
-import glob, re, sys
-def fm(path):
-    text = open(path).read()
-    m = re.match(r'^---\n(.*?)\n---\n', text, re.S)
-    return dict(re.findall(r'^([a-zA-Z-]+):\s*(.*)$', m.group(1), re.M)) if m else None
-
-ok = True
-agents = glob.glob('agents/*.md')
-skills = glob.glob('skills/*/SKILL.md')
-if len(agents) != 9: print(f'FAIL: expected 9 agents, found {len(agents)}'); ok = False
-if len(skills) != 2: print(f'FAIL: expected 2 skills, found {len(skills)}'); ok = False
-for p in agents:
-    f = fm(p)
-    if not f or not f.get('name') or not f.get('description') or not f.get('tools'):
-        print(f'FAIL: {p} missing frontmatter name/description/tools'); ok = False
-    if f and 'model' in f:
-        print(f'FAIL: {p} must not set model in frontmatter'); ok = False
-for p in skills:
-    f = fm(p)
-    if not f or not f.get('name') or not f.get('description'):
-        print(f'FAIL: {p} missing frontmatter name/description'); ok = False
-sys.exit(0 if ok else 1)
-EOF
-
+if command -v claude >/dev/null 2>&1; then
+  claude plugin validate . --strict || fail=1
+else
+  echo "note: claude CLI not found, skipping plugin validate"
+fi
+python3 scripts/contract_check.py || fail=1
 [ "$fail" -eq 0 ] && echo PASS || { echo FAIL; exit 1; }
 ```
 
-- [ ] **Step 2: Run it to verify it fails** — `bash scripts/validate.sh` → Expected: `FAIL` (no JSON files, 0 agents, 0 skills).
+- [ ] **Step 3: Run `bash scripts/validate.sh`** — Expected: `FAIL` (missing manifests, 0 agents/skills).
 
-- [ ] **Step 3: Write `.claude-plugin/plugin.json`**
+- [ ] **Step 4: Write `.claude-plugin/plugin.json`**
 
 ```json
 {
   "name": "sf-orchestrator",
+  "displayName": "SF Orchestrator",
   "version": "0.1.0",
-  "description": "Salesforce development orchestrator: a large model plans, routes, and reviews while cheap specialized workers (Apex, LWC, tests, data, debug, metadata, deploy) execute using the official Salesforce skills.",
-  "author": { "name": "Antony Hani" }
+  "description": "Independent Salesforce development orchestrator for Claude Code: a large model plans, routes, and reviews while cheap specialized workers (Apex, LWC, tests, data, debug, metadata, deploy) execute using the public forcedotcom/sf-skills library. Not affiliated with Salesforce or Anthropic.",
+  "author": { "name": "Antony Hani" },
+  "license": "MIT",
+  "repository": "https://github.com/OWNER/sf-orchestrator",
+  "homepage": "https://github.com/OWNER/sf-orchestrator#readme",
+  "keywords": ["salesforce", "orchestrator", "agents", "apex", "lwc", "claude-code"]
 }
 ```
 
-- [ ] **Step 4: Write `.claude-plugin/marketplace.json`**
+(`OWNER` is replaced at publish time — Task 9 confirms the GitHub owner with the user; grep for `OWNER` must return nothing after that task.)
+
+- [ ] **Step 5: Write `.claude-plugin/marketplace.json`**
 
 ```json
 {
   "name": "sf-orchestrator-marketplace",
   "owner": { "name": "Antony Hani" },
+  "metadata": { "description": "Marketplace for the sf-orchestrator plugin — an independent Salesforce development orchestrator for Claude Code." },
   "plugins": [
-    {
-      "name": "sf-orchestrator",
-      "source": "./",
-      "description": "Salesforce development orchestrator with specialized worker agents."
-    }
+    { "name": "sf-orchestrator", "source": "./", "description": "Salesforce development orchestrator with specialized worker agents, enforcement hooks, and per-worker model config." }
   ]
 }
 ```
 
-- [ ] **Step 5: Write `LICENSE`** — standard MIT text, copyright `2026 Antony Hani`.
+- [ ] **Step 6: Write `LICENSE`** — standard MIT text, copyright `2026 Antony Hani`.
 
-- [ ] **Step 6: Run `bash scripts/validate.sh`** — still `FAIL` (agents/skills missing) but JSON checks must produce no `invalid JSON` lines.
+- [ ] **Step 7: Run `bash scripts/validate.sh`** — still FAIL (agents/skills/schema/hooks missing) but no manifest-JSON errors.
 
-- [ ] **Step 7: Commit** — `chore: plugin scaffold, manifests, validation script`
+- [ ] **Step 8: Commit** — `chore: scaffold, manifests, validator`
 
 ---
 
-### Task 2: Config skill + config schema
+### Task 2: Enforcement hooks + negative fixtures
 
 **Files:**
-- Create: `skills/config/SKILL.md`
+- Create: `hooks/hooks.json`, `scripts/guard.py`, `tests/fixtures/agent_missing_model.json`, `tests/fixtures/bash_deploy_unapproved.json`, `tests/fixtures/bash_ok.json`, `tests/test_guard.sh`
 
 **Interfaces:**
-- Produces: the canonical config file contract used by the orchestrate skill and README: path `.claude/sf-orchestrator.json` in the USER'S project, schema exactly as in the code block below.
+- Produces: PreToolUse guard. Blocks (exit 2 + stderr): `Agent` calls with `subagent_type` starting `sf-` and no `model`; Bash deploy/destructive commands without a fresh matching `.claude/sf-orchestrator-approval.json`. Approval file schema: `{"org": "<alias>", "scope": ["..."], "grantedAt": "<ISO-8601>"}` — written by the orchestrate skill after user confirmation (Task 7).
 
-- [ ] **Step 1: Write `skills/config/SKILL.md`**
+- [ ] **Step 1: Write `tests/test_guard.sh` (failing test)**
 
-````markdown
----
-name: config
-description: Use when the user wants to configure sf-orchestrator - set worker models, escalation tier, enable/disable the deploy worker, or add an external executor. Creates or edits .claude/sf-orchestrator.json in the current project.
----
+```bash
+#!/usr/bin/env bash
+set -uo pipefail
+cd "$(dirname "$0")/.."
+fail=0
+expect() { # expect <exit-code> <fixture>
+  python3 scripts/guard.py < "tests/fixtures/$2" >/dev/null 2>&1
+  actual=$?
+  [ "$actual" -eq "$1" ] || { echo "FAIL: $2 expected exit $1 got $actual"; fail=1; }
+}
+rm -f .claude/sf-orchestrator-approval.json
+expect 2 agent_missing_model.json
+expect 2 bash_deploy_unapproved.json
+expect 0 bash_ok.json
+mkdir -p .claude
+python3 - <<'EOF'
+import json, datetime
+json.dump({"org": "my-sandbox", "scope": ["classes/Foo.cls"],
+           "grantedAt": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+          open('.claude/sf-orchestrator-approval.json', 'w'))
+EOF
+expect 0 bash_deploy_unapproved.json   # now approved: same org appears in command
+rm -f .claude/sf-orchestrator-approval.json
+[ "$fail" -eq 0 ] && echo GUARD-PASS || { echo GUARD-FAIL; exit 1; }
+```
 
-# sf-orchestrator: config
+- [ ] **Step 2: Write the fixtures**
 
-Interactively create or edit `.claude/sf-orchestrator.json` in the current project root.
+`tests/fixtures/agent_missing_model.json`:
+```json
+{"tool_name": "Agent", "tool_input": {"subagent_type": "sf-apex-worker", "prompt": "x", "description": "x"}}
+```
+`tests/fixtures/bash_deploy_unapproved.json`:
+```json
+{"tool_name": "Bash", "tool_input": {"command": "sf project deploy start --source-dir force-app --target-org my-sandbox"}}
+```
+`tests/fixtures/bash_ok.json`:
+```json
+{"tool_name": "Bash", "tool_input": {"command": "sf sobject describe --sobject Account --target-org my-sandbox"}}
+```
 
-## Schema (canonical)
+- [ ] **Step 3: Run `bash tests/test_guard.sh`** — Expected: FAIL (guard.py missing).
+
+- [ ] **Step 4: Write `scripts/guard.py`**
+
+```python
+#!/usr/bin/env python3
+"""PreToolUse guard for sf-orchestrator. Exit 0 allows; exit 2 blocks (stderr shown to the model)."""
+import datetime, json, os, re, sys
+
+APPROVAL = os.path.join('.claude', 'sf-orchestrator-approval.json')
+APPROVAL_TTL_MIN = 60
+DESTRUCTIVE = re.compile(
+    r'\bsf\s+project\s+deploy\b|\bsfdx\s+force:source:deploy\b|'
+    r'\bsf\s+data\s+delete\b|\bsf\s+org\s+delete\b')
+
+def block(msg):
+    print(f'sf-orchestrator guard: {msg}', file=sys.stderr)
+    sys.exit(2)
+
+def main():
+    try:
+        event = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        sys.exit(0)  # not our concern; never break unrelated tooling
+    tool = event.get('tool_name', '')
+    tin = event.get('tool_input', {}) or {}
+
+    if tool == 'Agent':
+        sub = str(tin.get('subagent_type', ''))
+        if sub.startswith('sf-') and not tin.get('model'):
+            block(f'dispatch of {sub} without an explicit model parameter. '
+                  'Set model from .claude/sf-orchestrator.json and retry.')
+
+    if tool == 'Bash':
+        cmd = str(tin.get('command', ''))
+        if DESTRUCTIVE.search(cmd):
+            if not os.path.exists(APPROVAL):
+                block('deploy/destructive command without approval. Confirm org and '
+                      'scope with the user, write .claude/sf-orchestrator-approval.json, retry.')
+            try:
+                approval = json.load(open(APPROVAL))
+                granted = datetime.datetime.fromisoformat(approval['grantedAt'])
+                age_min = (datetime.datetime.now(datetime.timezone.utc) - granted).total_seconds() / 60
+                org = approval.get('org', '')
+            except (KeyError, ValueError, json.JSONDecodeError):
+                block('approval file malformed; re-confirm with the user and rewrite it.')
+            if age_min > APPROVAL_TTL_MIN:
+                block(f'approval expired ({int(age_min)} min old, TTL {APPROVAL_TTL_MIN}). Re-confirm with the user.')
+            if org and org not in cmd:
+                block(f'command does not target the approved org "{org}".')
+    sys.exit(0)
+
+main()
+```
+
+- [ ] **Step 5: Write `hooks/hooks.json`**
 
 ```json
 {
-  "models": {
-    "default": "sonnet",
-    "escalation": "opus",
-    "workers": {
-      "sf-mapper": "haiku",
-      "sf-reviewer": "sonnet"
-    }
-  },
-  "deployWorker": { "enabled": false },
-  "externalExecutors": {
-    "codex": { "enabled": false, "command": "codex exec" }
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Bash",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/guard.py\"" }
+        ]
+      }
+    ]
   }
 }
 ```
 
-- `models.default` — model for any worker without an override. Allowed: `haiku`, `sonnet`, `opus`.
-- `models.escalation` — tier used after a unit fails twice.
-- `models.workers` — per-agent overrides keyed by agent name (`sf-apex-worker`, `sf-lwc-worker`, `sf-test-worker`, `sf-data-worker`, `sf-debug-worker`, `sf-metadata-worker`, `sf-deploy-worker`, `sf-mapper`, `sf-reviewer`).
-- `deployWorker.enabled` — when false the orchestrator must never dispatch sf-deploy-worker.
-- `externalExecutors` — optional CLI executors (run via Bash) usable as a tier between default and escalation. Disabled by default; machine-specific.
+- [ ] **Step 6: Run `bash tests/test_guard.sh`** — Expected: `GUARD-PASS`.
 
-## Workflow
+- [ ] **Step 7: Append the guard test to `scripts/validate.sh`** — add `bash tests/test_guard.sh || fail=1` before the final PASS/FAIL line.
 
-1. Read `.claude/sf-orchestrator.json` if it exists; otherwise start from the schema above.
-2. Ask the user, one question at a time (AskUserQuestion where available):
-   - Default worker model? (sonnet recommended)
-   - Escalation model? (opus recommended)
-   - Any per-worker overrides? (recommend sf-mapper: haiku)
-   - Enable the deploy worker? (default NO; explain it lets an agent deploy to a Salesforce org)
-   - Add an external executor CLI? (default no)
-3. Write the merged result to `.claude/sf-orchestrator.json` (create `.claude/` if needed).
-4. Show the final JSON and remind the user the orchestrator reads it at the start of every run.
-
-Never write any key not in the schema. Never set a model value other than haiku/sonnet/opus.
-````
-
-- [ ] **Step 2: Run `bash scripts/validate.sh`** — Expected: still FAIL overall (agents missing) but no `skills/` frontmatter failures and skill count failure now says `found 1`.
-
-- [ ] **Step 3: Commit** — `feat: config skill with canonical config schema`
+- [ ] **Step 8: Commit** — `feat: PreToolUse guard (model-less dispatch, unapproved deploys) with fixtures`
 
 ---
 
-### Task 3: Shared agent contract + code workers (apex, lwc, test)
+### Task 3: Config schema + config skill
+
+**Files:**
+- Create: `schemas/config.schema.json`, `skills/config/SKILL.md`
+
+**Interfaces:**
+- Produces: canonical config contract at `.claude/sf-orchestrator.json` (user's project), schema below; loader rules consumed verbatim by Task 7.
+
+- [ ] **Step 1: Write `schemas/config.schema.json`**
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "sf-orchestrator config",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": { "enum": ["haiku", "sonnet", "opus"] },
+        "escalation": { "enum": ["haiku", "sonnet", "opus"] },
+        "workers": {
+          "type": "object",
+          "propertyNames": {
+            "enum": ["sf-apex-worker", "sf-lwc-worker", "sf-test-worker", "sf-data-worker",
+                     "sf-debug-worker", "sf-metadata-worker", "sf-deploy-worker",
+                     "sf-mapper", "sf-reviewer"]
+          },
+          "additionalProperties": { "enum": ["haiku", "sonnet", "opus"] }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxConcurrent": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 3 }
+      }
+    },
+    "deployWorker": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "effort": { "enum": ["low", "medium", "high", null] },
+    "externalExecutors": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["enabled", "executable", "args"],
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "executable": { "type": "string" },
+          "args": { "type": "array", "items": { "type": "string" } },
+          "timeoutSeconds": { "type": "integer", "minimum": 30, "maximum": 3600 }
+        }
+      }
+    }
+  }
+}
+```
+
+- [ ] **Step 2: Write `skills/config/SKILL.md`** — frontmatter `name: config`, `description: Use when the user wants to configure sf-orchestrator - worker models, escalation tier, concurrency/retry limits, deploy worker enablement, or external executors. Creates or edits .claude/sf-orchestrator.json in the current project.` Body:
+
+````markdown
+# sf-orchestrator: config
+
+Create or edit `.claude/sf-orchestrator.json`, always conforming to `schemas/config.schema.json` in this plugin.
+
+## Defaults
+
+```json
+{
+  "models": { "default": "sonnet", "escalation": "opus",
+              "workers": { "sf-mapper": "haiku", "sf-reviewer": "sonnet" } },
+  "limits": { "maxConcurrent": 4, "maxAttempts": 2 },
+  "deployWorker": { "enabled": false },
+  "effort": null,
+  "externalExecutors": {}
+}
+```
+
+## Loader rules (shared with the orchestrate skill)
+
+- Missing file → use defaults silently.
+- Malformed JSON → STOP and tell the user; never guess or overwrite.
+- Unknown keys → warn, ignore.
+- Invalid model value → error naming the key.
+- Defaults merge per-key (a partial file is fine).
+
+## Workflow
+
+1. Read the existing file if present; else start from defaults.
+2. Ask one question at a time (AskUserQuestion where available): default model → escalation model → per-worker overrides (recommend sf-mapper: haiku) → limits → enable deploy worker? (default NO — explain it permits org deploys, still gated per-run by approval) → external executor? (default no; if yes, capture executable + fixed args array + timeout, warn it runs a local CLI and requires trust).
+3. Validate the result against the schema (mentally; keys and enums above). Write the file, creating `.claude/` if needed.
+4. Show the final JSON; note that `effort` is reserved and currently inert in Claude Code dispatches.
+
+Never write keys outside the schema.
+````
+
+- [ ] **Step 3: Run `bash scripts/validate.sh`** — schema JSON valid; skill count failure now `found 1`.
+
+- [ ] **Step 4: Commit** — `feat: config schema and config skill`
+
+---
+
+### Task 4: Code workers (apex, lwc, test)
 
 **Files:**
 - Create: `agents/sf-apex-worker.md`, `agents/sf-lwc-worker.md`, `agents/sf-test-worker.md`
 
 **Interfaces:**
-- Produces: the **shared contract block** (below) reused verbatim in every agent; agent names as listed (orchestrate skill routes by these names).
+- Produces: the **shared contract block** below, reused verbatim in every agent (Tasks 4–6), `<CAPS>` replaced by that agent's capability probe lists.
 
-**Shared contract block** — include at the end of EVERY agent prompt in Tasks 3–5, replacing `<SKILLS>` with that agent's skill list:
+**Shared contract block:**
 
 ```markdown
 ## Operating contract
 
-**Skill loading (do this FIRST):** Before any other action, invoke via the Skill tool: <SKILLS>. If a skill is unavailable, proceed using the Fallback cheat-sheet below and flag `fallback: true` in your report.
+**Skill loading (FIRST action):** For each capability you need, try the probe list in order via the Skill tool and use the first that loads: <CAPS>. If none loads for a capability, check your Fallback cheat-sheet: if it covers the operation, proceed with it and set `fallback: true` in your report; if it does not (or the operation is marked blocked), STOP and report a capability-gap.
 
-**Blocked-worker protocol:** If the plan you were given is wrong, impossible, contradicts the codebase, or requires you to make an assumption — STOP. Do not improvise. Report the problem and wait for a corrected plan.
+**Precedence:** Your dispatched plan defines scope and file boundaries. If a loaded skill's workflow wants to exceed them (extra files, extra steps), follow the plan — except tests the skill generates for this unit's own code, which you own and report.
 
-**Final report (compact, structured — no code dumps, no diffs):**
-- `skills_loaded`: which skills loaded, or `fallback: true`
+**Blocked-worker protocol:** If the plan is wrong, impossible, contradicts the codebase, or requires an assumption — STOP. Do not improvise. Report the problem and wait for a corrected plan.
+
+**Final report (compact — no code dumps, no diffs):**
+- `skills_loaded`: skill names that loaded, or `fallback: true`, or the capability-gap
 - `files_changed`: paths + one-line summary each
-- `checks_run`: each acceptance check from the plan + its actual output/result
+- `checks_run`: each acceptance check from the plan + actual output/result
 - `deviations`: anything done differently than planned, or `none`
 ```
 
 - [ ] **Step 1: Write `agents/sf-apex-worker.md`**
 
-````markdown
----
-name: sf-apex-worker
-description: Implements Apex work units dispatched by the sf-orchestrator - classes, triggers, services, selectors, batch/queueable/schedulable jobs, REST resources, and SOQL inside Apex. Executes an explicit plan; does not design solutions.
-tools: Read, Write, Edit, Grep, Glob, Bash, Skill
----
+Frontmatter: `name: sf-apex-worker`; `description: Implements Apex work units dispatched by the sf-orchestrator - classes, triggers, services, batch/queueable jobs, REST resources, SOQL in Apex. Executes an explicit plan; does not design solutions.`; `tools: Read, Write, Edit, Grep, Glob, Bash, Skill`.
 
-You are a Salesforce Apex implementation worker. You execute exactly one work unit from a plan written by an orchestrator. The plan lists exact files, exact interfaces, and acceptance criteria — follow it literally.
+Body: one-paragraph role intro ("You execute exactly one work unit from an orchestrator's plan — exact files, exact interfaces, acceptance criteria; follow it literally."), then fallback cheat-sheet, then the shared contract block with `<CAPS>` = "apex: `platform-apex-generate` then `generating-apex`; soql (if the unit designs queries): `platform-soql-query` then `querying-soql`".
 
-## Fallback cheat-sheet (only if skills fail to load)
-
-- Bulkify everything: methods take collections; never assume one record.
-- No SOQL and no DML inside loops; query into Maps keyed by Id first, collect records and do one DML after the loop.
-- One trigger per object, no logic in the trigger body — delegate to a handler class.
-- Respect governor limits (100 SOQL / 150 DML / 50k rows per transaction).
-- Wrap DML in try/catch; never swallow exceptions silently.
-- Prefer `with sharing` unless the plan states otherwise; use bind variables in all SOQL (no string-concatenated queries).
-
-## Operating contract
-
-**Skill loading (do this FIRST):** Before any other action, invoke via the Skill tool: `generating-apex`, and `querying-soql` if the unit involves query design. If a skill is unavailable, proceed using the Fallback cheat-sheet above and flag `fallback: true` in your report.
-
-**Blocked-worker protocol:** If the plan you were given is wrong, impossible, contradicts the codebase, or requires you to make an assumption — STOP. Do not improvise. Report the problem and wait for a corrected plan.
-
-**Final report (compact, structured — no code dumps, no diffs):**
-- `skills_loaded`: which skills loaded, or `fallback: true`
-- `files_changed`: paths + one-line summary each
-- `checks_run`: each acceptance check from the plan + its actual output/result
-- `deviations`: anything done differently than planned, or `none`
-````
-
-- [ ] **Step 2: Write `agents/sf-lwc-worker.md`** — same structure. Frontmatter: `name: sf-lwc-worker`; `description: Implements Lightning Web Component work units dispatched by the sf-orchestrator - components, templates, CSS, js-meta.xml, wire adapters, and Jest tests. Executes an explicit plan; does not design solutions.`; `tools: Read, Write, Edit, Grep, Glob, Bash, Skill`. Intro sentence adapted to LWC. Skills in contract: `generating-lwc-components`. Fallback cheat-sheet:
-
+Cheat-sheet:
 ```markdown
-- One component per folder: `name.js`, `name.html`, `name.css`, `name.js-meta.xml` (meta must set apiVersion and isExposed/targets).
-- Use `@wire` for reactive reads, imperative Apex for user-action writes; never mix cached wire reads with post-DML re-reads.
-- `@api` properties are set by parents AFTER construction — never read them in the constructor.
-- No direct DOM manipulation outside the component's own template; query with `this.template.querySelector`.
-- Handle Apex errors: catch, extract `error.body.message`, surface via toast or inline text — never fail silently.
-- Jest: mock all `@salesforce/*` imports; flush promises before asserting DOM; one behavior per test.
+## Fallback cheat-sheet (degraded mode only)
+- Bulkify: methods take collections; never assume one record.
+- No SOQL/DML in loops — query into Maps keyed by Id before, collect and DML once after.
+- One trigger per object, zero logic in the trigger body; delegate to a handler class.
+- Governor limits: 100 SOQL / 150 DML / 50k rows per transaction.
+- DML in try/catch; never swallow exceptions.
+- `with sharing` unless the plan says otherwise; bind variables in all SOQL.
 ```
 
-- [ ] **Step 3: Write `agents/sf-test-worker.md`** — Frontmatter: `name: sf-test-worker`; `description: Writes and fixes Apex test classes and runs test/coverage cycles for work units dispatched by the sf-orchestrator. Executes an explicit plan; does not design solutions.`; `tools: Read, Write, Edit, Grep, Glob, Bash, Skill`. Skills in contract: `generating-apex-test`, `running-apex-tests`. Fallback cheat-sheet:
+- [ ] **Step 2: Write `agents/sf-lwc-worker.md`** — same shape. `description: Implements Lightning Web Component work units dispatched by the sf-orchestrator - components, templates, CSS, js-meta.xml, wire adapters, Jest tests. Executes an explicit plan; does not design solutions.`; `tools: Read, Write, Edit, Grep, Glob, Bash, Skill`. `<CAPS>` = "lwc: `experience-lwc-generate` then `generating-lwc-components`". Cheat-sheet:
 
 ```markdown
-- `@isTest` classes; create ALL data in the test (factory pattern); never `seeAllData=true`.
-- Test bulk paths with 200+ records, not just single records.
-- `Test.startTest()/stopTest()` around the action under test to reset limits and flush async.
-- Assert outcomes with messages (`Assert.areEqual(expected, actual, 'why')`) — a test without asserts is not a test.
-- Cover positive, negative (expected exception), and permission paths (`System.runAs`).
-- Run tests via `sf apex run test --tests <Class> --result-format human --synchronous` and read actual failures before editing.
+## Fallback cheat-sheet (degraded mode only)
+- One component per folder: name.js/.html/.css/.js-meta.xml (meta sets apiVersion, isExposed, targets).
+- `@wire` for reactive reads; imperative Apex for user-action writes.
+- `@api` props are set after construction — never read them in the constructor.
+- DOM access only via `this.template.querySelector`.
+- Surface Apex errors (extract error.body.message → toast/inline); never fail silently.
+- Jest: mock all `@salesforce/*` imports; flush promises before DOM asserts; one behavior per test.
 ```
 
-- [ ] **Step 4: Run `bash scripts/validate.sh`** — Expected: agent count failure now `found 3`, no frontmatter failures.
+- [ ] **Step 3: Write `agents/sf-test-worker.md`** — `description: Writes and fixes Apex test classes and runs test/coverage cycles for work units dispatched by the sf-orchestrator. Executes an explicit plan; does not design solutions.`; `tools: Read, Write, Edit, Grep, Glob, Bash, Skill`. `<CAPS>` = "apex-test-gen: `platform-apex-test-generate` then `generating-apex-test`; apex-test-run: `platform-apex-test-run` then `running-apex-tests`". Cheat-sheet:
 
-- [ ] **Step 5: Commit** — `feat: apex, lwc, and test worker agents with shared contract`
+```markdown
+## Fallback cheat-sheet (degraded mode only)
+- `@isTest`; create ALL data in-test (factory pattern); never `seeAllData=true`.
+- Test bulk paths (200+ records), not just singles.
+- `Test.startTest()/stopTest()` around the action under test.
+- Assert outcomes with messages; a test without asserts is not a test.
+- Cover positive, negative (expected exception), and `System.runAs` permission paths.
+- Run: `sf apex run test --tests <Class> --result-format human --synchronous --target-org <alias>`; read real failures before editing.
+```
+
+- [ ] **Step 4: Run `bash scripts/validate.sh`** — agent count `found 3`, no contract-phrase failures for these three.
+
+- [ ] **Step 5: Commit** — `feat: apex, lwc, test workers`
 
 ---
 
-### Task 4: data, debug, metadata workers
+### Task 5: data, debug, metadata workers
 
 **Files:**
 - Create: `agents/sf-data-worker.md`, `agents/sf-debug-worker.md`, `agents/sf-metadata-worker.md`
 
-Same structure and shared contract block as Task 3 (repeat it verbatim per agent with that agent's skills).
+Same shape + shared contract block per agent.
 
-- [ ] **Step 1: Write `agents/sf-data-worker.md`** — Frontmatter: `name: sf-data-worker`; `description: Seeds, imports, exports, and queries Salesforce org data for work units dispatched by the sf-orchestrator - test data generation, bulk loads, SOQL authoring, record cleanup. Executes an explicit plan; does not design solutions.`; `tools: Read, Write, Grep, Glob, Bash, Skill`. Skills: `handling-sf-data`, `querying-soql`. Fallback cheat-sheet:
+- [ ] **Step 1: `agents/sf-data-worker.md`** — `description: Seeds, imports, exports, and queries Salesforce org data for work units dispatched by the sf-orchestrator - test data, bulk loads, SOQL authoring, record cleanup. Executes an explicit plan; does not design solutions.`; `tools: Read, Write, Grep, Glob, Bash, Skill`. `<CAPS>` = "data: `platform-data-manage` then `handling-sf-data`; soql: `platform-soql-query` then `querying-soql`". Extra rule after the intro: "Data mutations are org mutations: your plan must name the target org and record scope; if it does not, invoke the blocked-worker protocol. On redispatch after a failure, first query what the prior attempt created before inserting again (idempotency)." Cheat-sheet:
 
 ```markdown
-- Always name the target org explicitly (`--target-org`) on every `sf` command; never rely on the default org.
-- Prefer `sf data` commands (query/create/upsert/delete, bulk upsert for >200 rows) over anonymous Apex; use anonymous Apex only when relationships require it.
-- Query before you mutate: verify record shape, record types, and required fields first.
-- Use external IDs for upserts where available; never hardcode record Ids across orgs.
-- Bind/escape user-provided values in SOQL; add LIMIT to exploratory queries.
-- Clean up only records you created, identified by a tag field or captured Ids — never blanket-delete.
+## Fallback cheat-sheet (degraded mode only)
+- Explicit `--target-org` on every sf command; never the default org.
+- Prefer `sf data` commands (bulk upsert >200 rows); anonymous Apex only when relationships require it.
+- Query before mutating: verify shape, record types, required fields.
+- Upsert on external IDs; never hardcode cross-org record Ids.
+- LIMIT exploratory queries; bind/escape all values.
+- Delete only records you created (tag field or captured Ids) — never blanket-delete.
 ```
 
-- [ ] **Step 2: Write `agents/sf-debug-worker.md`** — Frontmatter: `name: sf-debug-worker`; `description: Analyzes Salesforce debug logs, governor-limit failures, and stack traces for work units dispatched by the sf-orchestrator, and reports root cause with evidence. Read-mostly; does not fix code unless the plan says so.`; `tools: Read, Grep, Glob, Bash, Skill`. Skills: `debugging-apex-logs`. Fallback cheat-sheet:
+- [ ] **Step 2: `agents/sf-debug-worker.md`** — `description: Analyzes Salesforce debug logs, governor-limit failures, and stack traces for work units dispatched by the sf-orchestrator; reports root cause with evidence. Read-mostly; fixes code only if the plan says so.`; `tools: Read, Grep, Glob, Bash, Skill`. `<CAPS>` = "debug-logs: `platform-apex-logs-debug` then `debugging-apex-logs`". Cheat-sheet:
 
 ```markdown
-- Retrieve logs with `sf apex list log` / `sf apex get log -i <id>` against the explicit target org.
-- Read the LIMIT_USAGE and EXCEPTION_THROWN lines first; the last stack frame in the user's namespace is usually the culprit.
-- SOQL 101 / DML 151: count QUERY/DML entries per stack frame to find the loop; the fix is bulkification at that frame, not raising limits.
+## Fallback cheat-sheet (degraded mode only)
+- `sf apex list log` / `sf apex get log -i <id>` against the explicit target org.
+- Read LIMIT_USAGE and EXCEPTION_THROWN lines first; last user-namespace stack frame is usually the culprit.
+- SOQL 101/DML 151: count QUERY/DML entries per frame to find the loop; fix is bulkification there.
 - Distinguish trigger recursion (same handler repeating) from batch/queueable chaining before blaming volume.
-- Root-cause claims need evidence: quote the exact log lines in your report.
+- Every root-cause claim quotes the exact log lines as evidence.
 ```
 
-- [ ] **Step 3: Write `agents/sf-metadata-worker.md`** — Frontmatter: `name: sf-metadata-worker`; `description: Creates and edits declarative Salesforce metadata for work units dispatched by the sf-orchestrator - custom objects, fields, validation rules, permission sets, flows, flexipages. Executes an explicit plan; does not design solutions.`; `tools: Read, Write, Edit, Grep, Glob, Skill`. Skills: `generating-custom-object`, `generating-custom-field`, `generating-validation-rule`, `generating-permission-set`, `generating-flow`, `generating-flexipage` (load only those relevant to the unit). Fallback cheat-sheet:
+- [ ] **Step 3: `agents/sf-metadata-worker.md`** — `description: Creates and edits declarative Salesforce metadata for work units dispatched by the sf-orchestrator - custom objects, fields, validation rules, permission sets, flexipages, and Flows (via the Salesforce DX MCP metadata tools). Executes an explicit plan; does not design solutions.`; `tools: Read, Write, Edit, Grep, Glob, Skill, ToolSearch, mcp__salesforce__deploy_metadata, mcp__salesforce__retrieve_metadata`. `<CAPS>` = "object/field/validation-rule/permset/flexipage: `generating-custom-object`, `generating-custom-field`, `generating-validation-rule`, `generating-permission-set`, `generating-flexipage` (or `platform-metadata-*` successors); flow: `automation-flow-generate` then `generating-flow`". Extra rule: "Flow work REQUIRES the Flow skill plus its MCP metadata tool (load via ToolSearch if deferred); never hand-write Flow XML. If either is unavailable, Flow work is BLOCKED — report a capability-gap, do not fall back." Cheat-sheet (explicitly excludes Flows):
 
 ```markdown
-- One metadata component per file, exact suffix conventions (`.object-meta.xml`, `.field-meta.xml`, etc.) under `force-app/main/default/`.
-- New custom fields ship with ZERO field-level security — every new field needs matching permission-set `fieldPermissions` entries.
-- Required fields must NOT appear in permission-set fieldPermissions (access is implicit; listing them breaks deploys).
-- Check existing picklist values and naming patterns in the repo before adding values or objects.
-- Master-Detail requires the child to be deployable without existing data conflicts; prefer Lookup unless rollups/ownership inheritance are required.
-- Validation rule formulas: test the error condition logic (rule fires when formula is TRUE).
+## Fallback cheat-sheet (degraded mode only — never for Flows)
+- One component per file, exact suffixes (.object-meta.xml, .field-meta.xml, ...) under force-app/main/default/.
+- New custom fields deploy with ZERO field-level security — pair every new field with permission-set fieldPermissions.
+- Required fields must NOT appear in fieldPermissions (implicit access; listing them breaks deploys).
+- Check existing picklist values and naming patterns in the repo before adding.
+- Prefer Lookup over Master-Detail unless rollups/ownership inheritance are required.
+- Validation rules fire when the formula is TRUE — test the error condition.
 ```
 
-- [ ] **Step 4: Run `bash scripts/validate.sh`** — Expected: `found 6` agents, no frontmatter failures.
+- [ ] **Step 4: Run `bash scripts/validate.sh`** — `found 6`.
 
-- [ ] **Step 5: Commit** — `feat: data, debug, and metadata worker agents`
+- [ ] **Step 5: Commit** — `feat: data, debug, metadata workers (Flow via MCP, blocked on fallback)`
 
 ---
 
-### Task 5: deploy worker + mapper + reviewer
+### Task 6: deploy, mapper, reviewer
 
 **Files:**
 - Create: `agents/sf-deploy-worker.md`, `agents/sf-mapper.md`, `agents/sf-reviewer.md`
 
-Same structure and shared contract block (with agent-specific skills).
-
-- [ ] **Step 1: Write `agents/sf-deploy-worker.md`** — Frontmatter: `name: sf-deploy-worker`; `description: Retrieves, diffs, and deploys Salesforce metadata for work units dispatched by the sf-orchestrator. Only dispatched when the deploy worker is enabled in config and the user has confirmed org and scope.`; `tools: Read, Grep, Glob, Bash, Skill`. Skills: `deploying-metadata`. Add this extra section before the contract:
+- [ ] **Step 1: `agents/sf-deploy-worker.md`** — `description: Retrieves, diffs, and deploys Salesforce metadata for work units dispatched by the sf-orchestrator. Only dispatched when enabled in config and the user has confirmed org and scope (guard-enforced).`; `tools: Read, Grep, Glob, Bash, Skill`. `<CAPS>` = "deploy: `platform-metadata-deploy` then `deploying-metadata`". Before the contract, add:
 
 ```markdown
 ## Deploy safety (non-negotiable)
-
-- Deploy ONLY the components named in your plan, to the org named in your plan. If either is missing, invoke the blocked-worker protocol.
-- Always run a preview/validate first and report unexpected deletions or conflicts BEFORE the real deploy; if any appear, STOP and report.
-- Never deploy to an org whose alias suggests production unless the plan explicitly says production and states that the user confirmed it.
+- Deploy ONLY the components in your plan, to the org in your plan; missing either → blocked-worker protocol.
+- Validate/preview first; report unexpected deletions or conflicts and STOP before the real deploy.
+- A plugin guard blocks deploy commands without a fresh user approval file — if blocked, report it; never work around the guard.
+- Production deploys only when the plan explicitly states production AND user confirmation.
+- On test-gate failures, report failing tests verbatim; never downgrade test levels to force a deploy.
 ```
 
-Fallback cheat-sheet:
+Cheat-sheet:
+```markdown
+## Fallback cheat-sheet (degraded mode only)
+- `sf project deploy start --source-dir <paths> --target-org <alias>` — scoped, never whole-repo, unless the plan says otherwise.
+- Retrieve-and-diff before deploying: a deploy is a full-file replace and the org may hold newer work.
+- Preview (`--dry-run` / validate) before the real deploy; report deltas.
+```
+
+- [ ] **Step 2: `agents/sf-mapper.md`** — `description: Read-only Salesforce explorer for the sf-orchestrator. Verifies schema (objects, fields, types, picklists), permission-set grants, existing classes/triggers/components, and dependencies; returns compact facts for planning. Never edits anything.`; `tools: Read, Grep, Glob, Bash, Skill`. `<CAPS>` = "soql (live-org queries): `platform-soql-query` then `querying-soql`". Intro: READ-ONLY; Bash restricted to `sf sobject describe`, `sf data query`, `sf org list metadata`, `sf apex list log` and similar reads; in repo-only mode answer purely from local `*-meta.xml` files and say the org was not consulted. Cheat-sheet:
 
 ```markdown
-- Use `sf project deploy start --source-dir <paths> --target-org <alias>`; scoped, never whole-repo, unless the plan says otherwise.
-- Retrieve-and-diff before deploy: the org may have newer work; deploying a file is a full-file replace.
-- On test-gate failures, report the failing tests verbatim; do not switch test levels to force a deploy through.
+## Fallback cheat-sheet (degraded mode only)
+- Verify, never assume: exact API names via `sf sobject describe --sobject <X> --target-org <alias>` or the repo's *-meta.xml.
+- Report field TYPES and picklist values exactly — plans fail on assumed types.
+- FLS answers from permission-set XML cover permset grants ONLY — state that profiles, permission set groups, and muting are not covered.
+- Answer only what was asked, as structured facts (name -> value); say "not found" explicitly; no file dumps, no speculation.
 ```
 
-- [ ] **Step 2: Write `agents/sf-mapper.md`** — Frontmatter: `name: sf-mapper`; `description: Read-only Salesforce explorer for the sf-orchestrator. Verifies schema (objects, fields, types, picklists), FLS/permission sets, existing classes/triggers/components, and dependencies, and returns a compact factual summary for planning. Never edits anything.`; `tools: Read, Grep, Glob, Bash, Skill`. Skills: `querying-soql` (when live-org queries needed). Intro states: you are READ-ONLY; Bash is for `sf sobject describe`, `sf data query`, `sf org list metadata` and similar read commands only — never any command that mutates files or org state. Fallback cheat-sheet:
+- [ ] **Step 3: `agents/sf-reviewer.md`** — `description: Read-only adversarial reviewer for the sf-orchestrator final-review step. Tries to refute a completed unit's claims against its plan, baseline SHA, and owned-file list; runs the acceptance checks; returns a verdict with evidence. Never edits anything.`; `tools: Read, Grep, Glob, Bash, Skill`. `<CAPS>` = "apex-test-run (when the unit has Apex tests): `platform-apex-test-run` then `running-apex-tests`". Intro:
 
 ```markdown
-- Verify, don't assume: confirm object/field existence and exact API names via `sf sobject describe --sobject <X> --target-org <alias>` or the repo's `*-meta.xml` files.
-- Report field TYPES and picklist values exactly - plans fail on assumed types.
-- For FLS questions, grep permission-set XML for the field; absence of a fieldPermissions entry means no access.
-- Answer ONLY what was asked, as structured facts (name -> value); no file dumps, no speculation, and say "not found" explicitly when something does not exist.
+You receive: the unit's plan, its baseline commit SHA, its owned-file list, and the worker's report. The report is a CLAIM. Your stance is adversarial: try to REFUTE it — re-derive every claim yourself (`git diff <baseline> -- <owned files>`, run the actual checks). If you cannot confirm a claim, it fails; uncertainty = fail, with what you'd need to confirm.
+
+## Domain validation matrix (apply the rows matching the unit)
+- Apex: no SOQL/DML in loops; bulk-safe; asserts present in tests.
+- LWC: js-meta targets/apiVersion sane; wires/imperative used per plan; Jest passing.
+- Metadata: every new field has permission-set fieldPermissions; no required-field FLS entries.
+- Data: mutations match the planned org and record scope exactly.
+- Deploy: deployed component list == plan's list; org matches.
 ```
 
-- [ ] **Step 3: Write `agents/sf-reviewer.md`** — Frontmatter: `name: sf-reviewer`; `description: Read-only reviewer for the sf-orchestrator final-review step. Checks a completed work unit's diff against its plan, runs the unit's acceptance checks and tests, and returns a verdict with evidence. Never edits anything.`; `tools: Read, Grep, Glob, Bash, Skill`. Skills: `running-apex-tests` (when the unit has Apex tests). Intro: you receive a plan + a claimed-complete report; verify claims independently — read the actual diff (`git diff`), run the actual checks; workers' reports are claims, not evidence. Report format (replaces the standard files_changed report):
+Replace the standard report block with:
 
 ```markdown
 **Final report:**
 - `verdict`: pass | fail
-- `plan_conformance`: each plan requirement -> met / not met (with file:line evidence)
+- `plan_conformance`: each plan requirement -> met / not met, with file:line or command-output evidence
 - `checks_rerun`: each acceptance check + actual output
-- `discrepancies`: anything the worker's report claimed that you could not reproduce
+- `discrepancies`: claims in the worker report you could not reproduce (or refuted)
+- `skills_loaded`: skills used, or `fallback: true`
 ```
 
-Fallback cheat-sheet:
-
+Cheat-sheet:
 ```markdown
-- Diff first (`git diff <base>` scoped to the unit's files), then tests; a green suite does not prove the plan was followed.
-- Watch for: SOQL/DML in loops, missing FLS for new fields, tests without asserts, files touched outside the plan's list.
-- Fail the unit on any unplanned file change - even a harmless-looking one.
+## Fallback cheat-sheet (degraded mode only)
+- Diff first, scoped to owned files; a green test suite does not prove the plan was followed.
+- Fail on any changed file outside the owned-file list.
+- Deviations the worker did not declare are automatic fails.
 ```
 
-- [ ] **Step 4: Run `bash scripts/validate.sh`** — Expected: `found 9` agents, both skills… still FAIL only if orchestrate skill absent (`skills found 1`).
+- [ ] **Step 4: Run `bash scripts/validate.sh`** — `found 9`; only the orchestrate-skill count failing.
 
-- [ ] **Step 5: Commit** — `feat: deploy, mapper, and reviewer agents`
+- [ ] **Step 5: Commit** — `feat: deploy, mapper, reviewer agents`
 
 ---
 
-### Task 6: Orchestrate skill
+### Task 7: Orchestrate skill
 
 **Files:**
 - Create: `skills/orchestrate/SKILL.md`
 
 **Interfaces:**
-- Consumes: agent names from Tasks 3–5; config schema from Task 2.
+- Consumes: agent names (Tasks 4–6), config contract + loader rules (Task 3), approval-file schema (Task 2), capability probe lists (DESIGN.md).
 
-- [ ] **Step 1: Write `skills/orchestrate/SKILL.md`** with frontmatter `name: orchestrate`, `description: Use when the user says "orchestrator", "orchestrate", or asks to delegate a batch of Salesforce tasks (Apex, LWC, tests, data, metadata, debugging, deploys) to specialized worker agents while a larger model plans, tracks, and reviews.` Body sections, in order:
+- [ ] **Step 1: Write `skills/orchestrate/SKILL.md`** — frontmatter `name: orchestrate`, `description: Use when the user says "orchestrator", "orchestrate", or asks to delegate a batch of Salesforce tasks (Apex, LWC, tests, data, metadata, Flows, debugging, deploys) to specialized worker agents while a larger model plans, tracks, and reviews.` Body sections in order, content per DESIGN.md rev 2 (this is the authoritative checklist; write each as full prose/tables, no summaries):
 
-  1. **Overview** — orchestrator does ONLY high-value thinking (analysis, grouping, planning, tracking, review); all implementation is delegated; if a plan isn't executable without assumptions it isn't done; if the request is one small unit, say orchestration is overhead and offer to do it directly.
-  2. **Startup (mandatory, in order)** — (a) check the available-skills list for `generating-apex`, `generating-lwc-components`, `generating-apex-test`, `running-apex-tests`, `handling-sf-data`, `querying-soql`, `debugging-apex-logs`, `deploying-metadata`; if missing, warn the user that workers will run on fallback cheat-sheets and point to installing the official Salesforce skills plugin. (b) Read `.claude/sf-orchestrator.json`; if absent use defaults (default sonnet, escalation opus, sf-mapper haiku, deployWorker disabled). (c) Read the project's CLAUDE.md and note conventions to inline into worker prompts (the conventions hook).
-  3. **Context conservation** — never Read whole files; dispatch sf-mapper and consume summaries; workers return compact reports only.
-  4. **Routing table** — the 9-row table exactly as in `docs/DESIGN.md` (task type → agent name). Mixed units → dominant worker + instruction to load the extra skill.
-  5. **Workflow steps 1–7** — Intake & restructure (group/split/waves/no file collisions/user checkpoint before wave 1 unless autonomous); Track (task list; every original task maps to a unit); Plan per unit (exact files, exact interfaces, acceptance criteria, gotchas incl. CLAUDE.md conventions, do-not-touch; mapper-first: dispatch sf-mapper to verify every schema/metadata assumption BEFORE finalizing a plan); Dispatch (**HARD RULE: every Agent call MUST set `subagent_type` to the worker's agent name AND an explicit `model` from config — an omitted model silently inherits the expensive session model; never use fork; if a dispatch went out without a model, tell the user**; parallel dispatch for independent units; deploy gating: sf-deploy-worker only if config enables it AND the user confirmed org + scope this session, even in autonomous mode); Verify per unit (check report vs acceptance criteria; on failure fix the PLAN and redispatch; after a second failure escalate to `models.escalation` or an enabled external executor); Final review (dispatch sf-reviewer per unit/wave; orchestrator personally adjudicates only the original-requirements diff and cross-unit integration; report to user: what was done, by which worker/tier, deviations); Capture lessons (write new gotchas to persistent memory where available).
-  6. **External executors** — if config enables one (e.g. codex), it may be used as a mid-tier via Bash (`<command> "<prompt>"` in the target dir); on CLI error fall back to escalation model; never required.
-  7. **Common mistakes table** — port all rows from the original skill: orchestrator edits files itself; vague plans; missing gotchas; skipping final review; everything to opus; task lost in regroup; orchestrator reads files; worker improvises; two workers same file same wave; lessons evaporate; **Agent call without explicit model / via fork**; dispatching sf-deploy-worker while disabled or unconfirmed.
+  1. **Overview** — orchestrator does only high-value thinking; single-small-unit escape hatch.
+  2. **Startup (ordered)** — capability check over ALL probe lists (report supported/degraded/blocked matrix; refuse blocked); config load with the Task 3 loader rules; warn if `CLAUDE_CODE_SUBAGENT_MODEL` is set (it outranks per-call models); target-org resolution (confirm alias once per session, record in manifest) or repo-only mode (org capabilities blocked, mapper local-only).
+  3. **Run manifest** — `.claude/sf-orchestrator-run.json`: per unit {id, worker, model, status, baselineSha, ownedFiles, attempts, failureType, reportDigest}; write after every dispatch/completion; on invocation with an existing manifest, offer resume (skip completed units).
+  4. **Routing table** — 9 rows as in DESIGN.md; mixed units are SPLIT along ownership boundaries, never merged into a dominant worker.
+  5. **Workflow 1–7** — intake/grouping/waves (+ no file collisions, user checkpoint); track (+ manifest); plan (mapper-first mandatory; owned-file list per unit; gotchas = memory lessons only, CLAUDE.md reaches subagents natively — do not re-paste it); dispatch (**HARD RULE: explicit `subagent_type` + `model` on every Agent call — guard-enforced; never fork; ≤ `limits.maxConcurrent` in flight; serialize org-mutating units per org; record baseline SHA before each wave; re-anchor: re-read config + these rules at every wave boundary**); verify (typed failures: plan-defect → fix plan + redispatch; environment → surface, no retry; flaky → one same-tier retry; capability-gap → block + report; `limits.maxAttempts` then escalation model, then block; org-mutating redispatches carry an idempotency note); final review (sf-reviewer per unit with plan + baselineSha + ownedFiles, refute stance; then one completeness-critic reviewer over the original request; orchestrator adjudicates requirements diff + cross-unit integration; user report includes per-unit worker/tier/deviations/blocked); capture lessons.
+  6. **Deploy approval** — before dispatching sf-deploy-worker (or any data-deletion unit): config must enable it, user must confirm org + component scope THIS session, then write `.claude/sf-orchestrator-approval.json` {org, scope, grantedAt ISO-8601}; the guard enforces freshness (60 min) and org match; delete the file after the unit completes.
+  7. **External executors** — only if configured AND enabled: run via Bash as executable + fixed args array exactly as configured (never build a shell string from the prompt — pass the prompt via stdin), enforce timeoutSeconds, one-time per-project user trust confirmation before first use; any error → escalation model.
+  8. **Common mistakes table** — all rows from the original list plus: model-less/fork dispatch; dominant-worker merging; re-pasting CLAUDE.md into prompts; retrying environment failures; deploy without fresh approval; treating a degraded capability as supported; losing the manifest.
 
-- [ ] **Step 2: Run `bash scripts/validate.sh`** — Expected: `PASS`.
+- [ ] **Step 2: Run `bash scripts/validate.sh`** — Expected: `PASS` (with `claude` CLI present, plugin validate also green).
 
-- [ ] **Step 3: Commit** — `feat: orchestrate skill with SF routing, config-driven models, deploy gating`
+- [ ] **Step 3: Commit** — `feat: orchestrate skill (capability matrix, manifest, typed failures, guarded deploys)`
 
 ---
 
-### Task 7: README
+### Task 8: README, community files, CI, roadmap
 
 **Files:**
-- Create: `README.md`
+- Create: `README.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `CHANGELOG.md`, `docs/ROADMAP.md`, `.github/workflows/ci.yml`, `.github/ISSUE_TEMPLATE/bug_report.md`, `.github/ISSUE_TEMPLATE/feature_request.md`
 
-- [ ] **Step 1: Write `README.md`** with sections: **What it is** (token economics: expensive model plans/reviews, cheap workers execute; diagram of orchestrator → waves → workers → reviewer); **Prerequisites** (Claude Code + the official Salesforce skills plugin, with the note that without it workers degrade to built-in cheat-sheets and flag it); **Install** (`/plugin marketplace add <owner>/sf-orchestrator` then `/plugin install sf-orchestrator@sf-orchestrator-marketplace`); **Usage** (`/sf-orchestrator:orchestrate <batch of tasks>`, `/sf-orchestrator:config`); **Workers** (the 9-row table: agent, purpose, skills loaded, default model); **Configuration** (full schema from Task 2 with field docs); **Bring your own conventions** (orchestrator reads your project's CLAUDE.md and inlines relevant rules into every worker prompt); **Safety** (deploy worker disabled by default + org/scope confirmation; workers stop instead of improvising); **License** (MIT).
+- [ ] **Step 1: `README.md`** — sections: independence disclaimer (verbatim from DESIGN.md, at the very top); What it is (token economics + ASCII workflow diagram orchestrator→mapper→waves→workers→reviewers); Prerequisites (Claude Code ≥ current major, Node/npx, Salesforce CLI + authenticated org, `npx skills add forcedotcom/sf-skills`, Salesforce DX MCP server required for Flow work; macOS/Linux, Windows untested); Install (marketplace add + plugin install commands); Usage (`/sf-orchestrator:orchestrate ...`, `/sf-orchestrator:config`); Workers table (9 rows: agent, purpose, capabilities, default model); Capability matrix semantics (supported/degraded/blocked; fallback always flagged; Flows never fall back); Configuration (schema walkthrough incl. loader rules, limits, reserved `effort`, externalExecutors trust model); Safety (hook-enforced: model-less dispatch block + deploy approval; prompt-level everything else — stated plainly; token-cost warning: fan-out multiplies usage); Bring your own conventions (CLAUDE.md flows to workers natively); Versioning (semver, CHANGELOG); License.
+- [ ] **Step 2: Community files** — `CONTRIBUTING.md` (dev setup = run `bash scripts/validate.sh`; PR expectations; no vendored Salesforce content rule); `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1 standard text); `SECURITY.md` (private disclosure via GitHub security advisories; scope: guard bypasses are vulnerabilities); `CHANGELOG.md` (`## 0.1.0` initial); `docs/ROADMAP.md` (v2 items from DESIGN.md Roadmap verbatim); issue templates (bug: repro + capability matrix output + config; feature: problem/proposal).
+- [ ] **Step 3: `.github/workflows/ci.yml`**
 
-- [ ] **Step 2: Run `bash scripts/validate.sh`** — Expected: `PASS`.
+```yaml
+name: ci
+on: [push, pull_request]
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: bash scripts/validate.sh
+```
 
-- [ ] **Step 3: Commit** — `docs: README with install, usage, config reference`
+- [ ] **Step 4: Leak scan** — run `grep -rniE "nos local|sfdc-dev|tonyhani|/Users/" README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md CHANGELOG.md skills agents docs/ROADMAP.md` → Expected: no matches (DESIGN.md and plans/ are working docs and exempt, but must still not quote internal guideline content).
+- [ ] **Step 5: Run `bash scripts/validate.sh`** — `PASS`.
+- [ ] **Step 6: Commit** — `docs: README, community files, CI, roadmap`
 
 ---
 
-### Task 8: Local install + smoke test + migration
+### Task 9: Install, smoke test, migration, publish
 
-- [ ] **Step 1: Install locally** — add the repo as a local marketplace and install the plugin (user runs `/plugin marketplace add "/Users/tonyhani/Desktop/VS Code Projects/sf-orchestrator"` then `/plugin install sf-orchestrator@sf-orchestrator-marketplace`; these are interactive CLI commands — ask the user to run them).
-- [ ] **Step 2: Smoke test** — in a fresh session in the NOS Local project, run `/sf-orchestrator:config` (verify it writes `.claude/sf-orchestrator.json`), then `/sf-orchestrator:orchestrate` with a trivial 2-task request; verify: startup check runs, routing picks correct workers, every dispatch has explicit model, workers' reports include `skills_loaded`.
-- [ ] **Step 3: Migration** — after a successful smoke test, delete `~/.claude/skills/orchestrator-mode/` (the plugin replaces it).
-- [ ] **Step 4: Publish** — create the GitHub repo (public, MIT), push `main`. User confirms repo name/owner first.
-- [ ] **Step 5: Commit any smoke-test fixes** — `fix: smoke-test findings`
+- [ ] **Step 1: Local install** — ask the user to run `/plugin marketplace add <local repo path>` then `/plugin install sf-orchestrator@sf-orchestrator-marketplace` (interactive commands).
+- [ ] **Step 2: Smoke test (real project)** — in a Salesforce project session: `/sf-orchestrator:config` (verify file + schema conformance); `/sf-orchestrator:orchestrate` with a trivial 2-unit request; verify: capability matrix reported (note which names resolved — current vs legacy), routing correct, every dispatch has explicit model (try one without → guard must block), manifest file written, reviewer ran with refute stance. Test deploy gating: with `deployWorker.enabled: false`, a deploy request must be refused.
+- [ ] **Step 3: Negative smoke** — temporarily rename the sf-skills directory (or run in a project without them): degraded capabilities flagged, Flow request blocked with explanation. Restore afterwards.
+- [ ] **Step 4: Migration (backup, not delete)** — `mkdir -p ~/.claude/skills-backup && mv ~/.claude/skills/orchestrator-mode ~/.claude/skills-backup/` after the smoke test passes.
+- [ ] **Step 5: Publish** — confirm GitHub owner/repo name with the user; replace `OWNER` in plugin.json (grep to confirm none left); create the public repo; push `main`; tag `v0.1.0`; verify CI green.
+- [ ] **Step 6: Commit fixes** — `fix: smoke-test findings` (if any).
