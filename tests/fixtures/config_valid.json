@@ -1,0 +1,8 @@
+{
+  "models": { "default": "sonnet", "escalation": "opus",
+              "workers": { "sf-mapper": "haiku", "sf-reviewer": "sonnet" } },
+  "limits": { "maxConcurrent": 4, "maxAttempts": 2 },
+  "deployWorker": { "enabled": false },
+  "effort": null,
+  "externalExecutors": {}
+}

@@ -28,6 +28,8 @@ Create or edit `.claude/sf-orchestrator.json`, always conforming to `schemas/con
 - Invalid model value → error naming the key.
 - Defaults merge per-key (a partial file is fine).
 
+Implementations can consult `scripts/check_config.py` in this plugin as the reference for these rules.
+
 ## Workflow
 
 1. Read the existing file if present; else start from defaults.

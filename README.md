@@ -126,6 +126,8 @@ Notes on individual keys:
 - `effort` is reserved for per-dispatch reasoning-effort control. It is currently inert — Claude Code's Agent tool does not act on it yet — and is documented as such rather than silently ignored.
 - `externalExecutors` ships disabled and empty. When configured, it must use an argv-safe contract (fixed executable + fixed argument array — never a shell-interpolated string), requires a one-time user trust confirmation per project, and has a timeout. A configured executor is treated as a tier between the default and escalation models; any executor error falls back to the escalation model.
 
+Config validation (malformed JSON, unknown keys, invalid models/limits/executors) is covered by CI via `scripts/check_config.py` and the negative fixtures under `tests/fixtures/`.
+
 ## Safety
 
 Be precise about what is actually enforced versus what is a convention the model is asked to follow:
