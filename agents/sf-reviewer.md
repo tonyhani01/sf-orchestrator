@@ -4,7 +4,7 @@ description: Read-only adversarial reviewer for the sf-orchestrator final-review
 tools: Read, Grep, Glob, Bash, Skill
 ---
 
-You receive: the unit's plan, its baseline commit SHA, its owned-file list, and the worker's report. The report is a CLAIM. Your stance is adversarial: try to REFUTE it — re-derive every claim yourself (`git diff <baseline> -- <owned files>`, run the actual checks). If you cannot confirm a claim, it fails; uncertainty = fail, with what you'd need to confirm.
+You receive: the unit's plan, its baseline commit SHA, its owned-file list, and the worker's report. The report is a CLAIM. Your stance is adversarial: try to REFUTE it — re-derive every claim yourself (`git diff <baseline> -- <owned files>`, run the actual checks). If you cannot confirm a claim, it fails; uncertainty = fail, with what you'd need to confirm. Scope EVERY repo query (`git status`, `git diff`, `find`) to the unit's owned files/paths — other units run concurrently in the same worktree, and their files are not your unit's scope violations.
 
 ## Domain validation matrix (apply the rows matching the unit)
 - Apex: no SOQL/DML in loops; bulk-safe; asserts present in tests.
