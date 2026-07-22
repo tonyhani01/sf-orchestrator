@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "sf-orchestrator config",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": { "enum": ["haiku", "sonnet", "opus"] },
+        "escalation": { "enum": ["haiku", "sonnet", "opus"] },
+        "workers": {
+          "type": "object",
+          "propertyNames": {
+            "enum": ["sf-apex-worker", "sf-lwc-worker", "sf-test-worker", "sf-data-worker",
+                     "sf-debug-worker", "sf-metadata-worker", "sf-deploy-worker",
+                     "sf-mapper", "sf-reviewer"]
+          },
+          "additionalProperties": { "enum": ["haiku", "sonnet", "opus"] }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxConcurrent": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 3 }
+      }
+    },
+    "deployWorker": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "effort": { "enum": ["low", "medium", "high", null] },
+    "externalExecutors": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["enabled", "executable", "args"],
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "executable": { "type": "string" },
+          "args": { "type": "array", "items": { "type": "string" } },
+          "timeoutSeconds": { "type": "integer", "minimum": 30, "maximum": 3600 }
+        }
+      }
+    }
+  }
+}
