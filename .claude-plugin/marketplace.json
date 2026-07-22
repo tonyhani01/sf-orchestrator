@@ -1,0 +1,8 @@
+{
+  "name": "sf-orchestrator-marketplace",
+  "owner": { "name": "Antony Hani" },
+  "metadata": { "description": "Marketplace for the sf-orchestrator plugin — an independent Salesforce development orchestrator for Claude Code." },
+  "plugins": [
+    { "name": "sf-orchestrator", "source": "./", "description": "Salesforce development orchestrator with specialized worker agents, enforcement hooks, and per-worker model config." }
+  ]
+}
