@@ -21,13 +21,13 @@ The goal is large-model quality on planning and verification, at small-model tok
      │   sf-mapper   │   read-only: verifies schema/metadata before planning
      └───────┬───────┘
              ▼
-   ┌─────────────────────┐
-   │   dispatch waves     │  bounded concurrency, no file collisions
-   └──────────┬────────────┘
-              ▼
-  ┌─────┬─────┬─────┬─────┬─────┬─────┐
-  │apex │ lwc │test │data │debug│meta │  ...worker agents (cheap model tier)
-  └─────┴─────┴─────┴─────┴─────┴─────┘
+   ┌──────────────────┐
+   │  dispatch waves  │   bounded concurrency, no file collisions
+   └────────┬─────────┘
+            ▼
+  ┌─────┬─────┬─────┬─────┬─────┬─────┬──────┐
+  │apex │ lwc │test │data │debug│meta │deploy│  worker agents (cheap model tier)
+  └─────┴─────┴─────┴─────┴─────┴─────┴──────┘
               │
               ▼
      ┌───────────────┐
@@ -37,7 +37,7 @@ The goal is large-model quality on planning and verification, at small-model tok
         final report to you
 ```
 
-This fan-out is real token spend, not free — see [Safety](#safety) below.
+This fan-out is real token spend, not free — see the measured numbers in [docs/BENCHMARKS.md](docs/BENCHMARKS.md) and the [Safety](#safety) section.
 
 ## Prerequisites
 
@@ -51,8 +51,8 @@ This fan-out is real token spend, not free — see [Safety](#safety) below.
 ## Install
 
 ```
-/plugin marketplace add <marketplace-source>
-/plugin install sf-orchestrator
+/plugin marketplace add tonyhani01/sf-orchestrator
+/plugin install sf-orchestrator@sf-orchestrator-marketplace
 ```
 
 ## Usage
@@ -146,6 +146,10 @@ Be precise about what is actually enforced versus what is a convention the model
 ## Bring your own conventions
 
 Claude Code passes each project's `CLAUDE.md` to subagents automatically. Org-specific policy (naming conventions, layered architecture rules, logging patterns, deploy restrictions) enters entirely through your own `CLAUDE.md` — the orchestrator does not re-paste it into worker prompts, and this plugin ships with no org-specific policy baked in.
+
+## Contributing & security
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup (the whole test suite is `bash scripts/validate.sh`) and [SECURITY.md](./SECURITY.md) for the disclosure process — guard-hook bypasses are explicitly in scope as vulnerabilities.
 
 ## Versioning
 
