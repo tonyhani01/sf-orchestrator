@@ -6,6 +6,7 @@ APPROVAL = os.path.join('.claude', 'sf-orchestrator-approval.json')
 APPROVAL_TTL_MIN = 60
 DESTRUCTIVE = re.compile(
     r'\bsf\s+project\s+deploy\b|\bsfdx\s+force:source:deploy\b|'
+    r'\bsfdx\s+force:source:push\b|\bsf\s+project\s+delete\s+source\b|'
     r'\bsf\s+data\s+delete\b|\bsf\s+org\s+delete\b')
 
 def block(msg):
@@ -35,7 +36,11 @@ def main():
                       'scope with the user, write .claude/sf-orchestrator-approval.json, retry.')
             try:
                 approval = json.load(open(APPROVAL))
-                granted = datetime.datetime.fromisoformat(approval['grantedAt'])
+                ts = approval['grantedAt']
+                # Python < 3.11 rejects a trailing Z; normalize before parsing
+                if isinstance(ts, str) and ts.endswith('Z'):
+                    ts = ts[:-1] + '+00:00'
+                granted = datetime.datetime.fromisoformat(ts)
                 if granted.tzinfo is None:
                     granted = granted.replace(tzinfo=datetime.timezone.utc)
                 age_min = (datetime.datetime.now(datetime.timezone.utc) - granted).total_seconds() / 60
@@ -44,8 +49,11 @@ def main():
                 block('approval file malformed; re-confirm with the user and rewrite it.')
             if age_min > APPROVAL_TTL_MIN:
                 block(f'approval expired ({int(age_min)} min old, TTL {APPROVAL_TTL_MIN}). Re-confirm with the user.')
-            if org and org not in cmd:
-                block(f'command does not target the approved org "{org}".')
+            if not isinstance(org, str) or not org.strip():
+                block('approval file does not name a target org; re-confirm with the user and rewrite it.')
+            targets = re.findall(r'(?:--target-org|--targetusername|-o|-u)[=\s]+(\S+)', cmd)
+            if org not in targets:
+                block(f'command does not target the approved org "{org}" via --target-org/-o.')
     sys.exit(0)
 
 main()
