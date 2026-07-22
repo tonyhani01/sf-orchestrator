@@ -35,9 +35,11 @@ def main():
             try:
                 approval = json.load(open(APPROVAL))
                 granted = datetime.datetime.fromisoformat(approval['grantedAt'])
+                if granted.tzinfo is None:
+                    granted = granted.replace(tzinfo=datetime.timezone.utc)
                 age_min = (datetime.datetime.now(datetime.timezone.utc) - granted).total_seconds() / 60
                 org = approval.get('org', '')
-            except (KeyError, ValueError, json.JSONDecodeError):
+            except (KeyError, ValueError, TypeError, json.JSONDecodeError):
                 block('approval file malformed; re-confirm with the user and rewrite it.')
             if age_min > APPROVAL_TTL_MIN:
                 block(f'approval expired ({int(age_min)} min old, TTL {APPROVAL_TTL_MIN}). Re-confirm with the user.')
